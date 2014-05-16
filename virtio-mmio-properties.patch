@@ -1,0 +1,120 @@
+From 3731cf0f67dabaf2115d253be18d22c428ff76a7 Mon Sep 17 00:00:00 2001
+From: Mario Smarduch <m.smarduch@samsung.com>
+Date: Wed, 26 Feb 2014 15:58:54 -0800
+Subject: [PATCH] set virtio-mmio transport features for various backends
+
+
+Signed-off-by: Mario Smarduch <m.smarduch@samsung.com>
+---
+ hw/virtio/virtio-bus.c         |    5 +++++
+ hw/virtio/virtio-mmio.c        |   46 ++++++++++++++++++++++++++++++++++++++++
+ include/hw/virtio/virtio-bus.h |    4 ++++
+ 3 files changed, 55 insertions(+)
+
+diff --git a/hw/virtio/virtio-bus.c b/hw/virtio/virtio-bus.c
+index eb77019..5eb9ba1 100644
+--- a/hw/virtio/virtio-bus.c
++++ b/hw/virtio/virtio-bus.c
+@@ -44,8 +44,13 @@ int virtio_bus_device_plugged(VirtIODevice *vdev)
+     BusState *qbus = BUS(qdev_get_parent_bus(qdev));
+     VirtioBusState *bus = VIRTIO_BUS(qbus);
+     VirtioBusClass *klass = VIRTIO_BUS_GET_CLASS(bus);
++    DeviceState *proxy = DEVICE(qbus->parent);
+     DPRINTF("%s: plug device.\n", qbus->name);
+ 
++    if (klass->set_transport_features != NULL) {
++        klass->set_transport_features(proxy);
++    }
++
+     if (klass->device_plugged != NULL) {
+         klass->device_plugged(qbus->parent);
+     }
+diff --git a/hw/virtio/virtio-mmio.c b/hw/virtio/virtio-mmio.c
+index 8829eb0..f4e67a2 100644
+--- a/hw/virtio/virtio-mmio.c
++++ b/hw/virtio/virtio-mmio.c
+@@ -23,6 +23,8 @@
+ #include "hw/virtio/virtio.h"
+ #include "qemu/host-utils.h"
+ #include "hw/virtio/virtio-bus.h"
++#include "hw/virtio/virtio-net.h"
++#include "hw/virtio/virtio-blk.h"
+ 
+ /* #define DEBUG_VIRTIO_MMIO */
+ 
+@@ -89,6 +91,49 @@ typedef struct {
+     VirtioBusState bus;
+ } VirtIOMMIOProxy;
+ 
++/* supported x features for virtio-net backend */
++static Property virtio_net_transport_properties[] = {
++    DEFINE_VIRTIO_NET_FEATURES(VirtIOMMIOProxy, host_features),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++/* supported x features for virtio-blk backend */
++static Property virtio_blk_transport_properties[] = {
++    DEFINE_VIRTIO_BLK_FEATURES(VirtIOMMIOProxy, host_features),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static struct {
++    const char *backend_name;
++    const Property *props;
++} mmio_transport_backends[] = {
++    { TYPE_VIRTIO_NET, virtio_net_transport_properties },
++    { TYPE_VIRTIO_BLK, virtio_blk_transport_properties },
++    { NULL, NULL },
++};
++
++
++static void virtio_mmio_set_transport_features(DeviceState *d)
++{
++    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
++    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
++    int i;
++
++    for (i = 0; mmio_transport_backends[i].backend_name != NULL; i++) {
++        if (object_dynamic_cast(OBJECT(vdev),
++                                 mmio_transport_backends[i].backend_name)) {
++            const Property *props =  mmio_transport_backends[i].props;
++            for (; props->qtype == QTYPE_QBOOL && props->qtype != QTYPE_NONE;
++                   props++) {
++                if (props->defval == true) {
++                    proxy->host_features |= (1 << props->bitnr);
++                } else {
++                    proxy->host_features &= ~(1 << props->bitnr);
++                }
++            }
++        }
++    }
++}
+ static void virtio_mmio_bus_new(VirtioBusState *bus, size_t bus_size,
+                                 VirtIOMMIOProxy *dev);
+ 
+@@ -408,6 +453,7 @@ static void virtio_mmio_bus_class_init(ObjectClass *klass, void *data)
+     k->load_config = virtio_mmio_load_config;
+     k->get_features = virtio_mmio_get_features;
+     k->device_plugged = virtio_mmio_device_plugged;
++    k->set_transport_features = virtio_mmio_set_transport_features;
+     k->has_variable_vring_alignment = true;
+     bus_class->max_dev = 1;
+ }
+diff --git a/include/hw/virtio/virtio-bus.h b/include/hw/virtio/virtio-bus.h
+index 0756545..3136fc6 100644
+--- a/include/hw/virtio/virtio-bus.h
++++ b/include/hw/virtio/virtio-bus.h
+@@ -62,6 +62,10 @@ typedef struct VirtioBusClass {
+      * This is called by virtio-bus just before the device is unplugged.
+      */
+     void (*device_unplugged)(DeviceState *d);
++    /* Call before plugging a backend into transport to set features supported
++     * by the backend.
++     */
++    void (*set_transport_features)(DeviceState *d);
+     /*
+      * Does the transport have variable vring alignment?
+      * (ie can it ever call virtio_queue_set_align()?)
+-- 
+1.7.9.5
+
